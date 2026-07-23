@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"testing"
 	"time"
 
@@ -25,18 +24,6 @@ func openTestStore(t *testing.T, opts punchdb.Options) *Store {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return s
-}
-
-// openBenchStore opens an isolated Pebble store for benchmarks.
-func openBenchStore(b *testing.B) *Store {
-	b.Helper()
-	dir := b.TempDir()
-	s, err := Open(dir, punchdb.DefaultOptions())
-	if err != nil {
-		b.Fatalf("open store: %v", err)
-	}
-	b.Cleanup(func() { s.Close() })
 	return s
 }
 
@@ -430,74 +417,5 @@ func TestCheckpointRestoresData(t *testing.T) {
 	}
 	if string(got) != "v" {
 		t.Fatalf("restored = %q, want %q", got, "v")
-	}
-}
-
-// -----------------------------------------------------------------------------
-// Benchmarks (zero-allocation claims)
-// -----------------------------------------------------------------------------
-
-func BenchmarkSet(b *testing.B) {
-	s := openBenchStore(b)
-	ctx := context.Background()
-	val := []byte("benchmark-value")
-	key := make([]byte, 0, 32)
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		key = key[:0]
-		key = append(key, "bench:"...)
-		key = strconv.AppendInt(key, int64(i), 10)
-		if err := s.Set(ctx, key, val); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkGet(b *testing.B) {
-	s := openBenchStore(b)
-	ctx := context.Background()
-
-	key := []byte("bench:key")
-	val := bytes.Repeat([]byte("x"), 128)
-	if err := s.Set(ctx, key, val); err != nil {
-		b.Fatal(err)
-	}
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if _, err := s.Get(ctx, key); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-// BenchmarkPrefixScan simulates a paginated read: scan a prefix and stop after
-// 10 records via ErrStopIteration.
-func BenchmarkPrefixScan(b *testing.B) {
-	s := openBenchStore(b)
-	ctx := context.Background()
-
-	for i := 0; i < 1000; i++ {
-		key := []byte(fmt.Sprintf("punch:d:post:%04d", i))
-		if err := s.Set(ctx, key, []byte("v")); err != nil {
-			b.Fatal(err)
-		}
-	}
-	prefix := []byte("punch:d:post:")
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		n := 0
-		s.PrefixScan(ctx, prefix, func(key, value []byte) error {
-			n++
-			if n >= 10 {
-				return punchdb.ErrStopIteration
-			}
-			return nil
-		})
 	}
 }
