@@ -59,6 +59,47 @@ func BenchmarkGet(b *testing.B) {
 	}
 }
 
+// BenchmarkExists measures existence checks, which skip Get's safe-copy
+// allocation entirely.
+func BenchmarkExists(b *testing.B) {
+	s := openBenchStore(b)
+	ctx := context.Background()
+	key := []byte("bench:key")
+	if err := s.Set(ctx, key, bytes.Repeat([]byte("x"), 128)); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := s.Exists(ctx, key); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkGetIntoReused measures reads into a pre-sized, reused buffer —
+// the zero-copy path for callers that manage their own buffers.
+func BenchmarkGetIntoReused(b *testing.B) {
+	s := openBenchStore(b)
+	ctx := context.Background()
+	key := []byte("bench:key")
+	if err := s.Set(ctx, key, bytes.Repeat([]byte("x"), 128)); err != nil {
+		b.Fatal(err)
+	}
+	dst := make([]byte, 0, 128)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var err error
+		dst, err = s.GetInto(ctx, key, dst)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // BenchmarkDelete measures single-key deletes (pre-populated).
 func BenchmarkDelete(b *testing.B) {
 	s := openBenchStore(b)

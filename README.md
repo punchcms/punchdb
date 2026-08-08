@@ -66,6 +66,8 @@ func main() {
 | Method | Description |
 |--------|-------------|
 | `Get(ctx, key)` | Read a key (returns a safe copy). `ErrNotFound` if absent. |
+| `GetInto(ctx, key, dst)` | Read a key into a caller-supplied buffer, reusing `dst` when its capacity allows. Skips `Get`'s allocation. |
+| `Exists(ctx, key)` | Check whether a key is present, without copying its value. Zero allocations. |
 | `Set(ctx, key, value)` | Write (NoSync; WAL provides durability). |
 | `Delete(ctx, key)` | Delete (idempotent). |
 | `Scan(ctx, start, end, fn)` | Iterate `[start, end)` in sorted order. Return `ErrStopIteration` from `fn` to stop early. |

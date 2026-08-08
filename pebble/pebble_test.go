@@ -77,6 +77,104 @@ func TestGetNotFound(t *testing.T) {
 	}
 }
 
+// -----------------------------------------------------------------------------
+// Exists & GetInto
+// -----------------------------------------------------------------------------
+
+func TestExists(t *testing.T) {
+	s := openTestStore(t, punchdb.DefaultOptions())
+	ctx := context.Background()
+
+	ok, err := s.Exists(ctx, []byte("missing"))
+	if err != nil {
+		t.Fatalf("exists on missing key: %v", err)
+	}
+	if ok {
+		t.Fatal("exists = true, want false for missing key")
+	}
+
+	if err := s.Set(ctx, []byte("k"), []byte("v")); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	ok, err = s.Exists(ctx, []byte("k"))
+	if err != nil {
+		t.Fatalf("exists: %v", err)
+	}
+	if !ok {
+		t.Fatal("exists = false, want true for present key")
+	}
+}
+
+func TestExistsAfterDelete(t *testing.T) {
+	s := openTestStore(t, punchdb.DefaultOptions())
+	ctx := context.Background()
+
+	if err := s.Set(ctx, []byte("k"), []byte("v")); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if err := s.Delete(ctx, []byte("k")); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	ok, err := s.Exists(ctx, []byte("k"))
+	if err != nil {
+		t.Fatalf("exists: %v", err)
+	}
+	if ok {
+		t.Fatal("exists = true after delete, want false")
+	}
+}
+
+func TestGetIntoReusesBuffer(t *testing.T) {
+	s := openTestStore(t, punchdb.DefaultOptions())
+	ctx := context.Background()
+
+	if err := s.Set(ctx, []byte("k"), []byte("hello")); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	dst := make([]byte, 0, 32)
+	origPtr := &dst[:cap(dst)][0]
+
+	got, err := s.GetInto(ctx, []byte("k"), dst)
+	if err != nil {
+		t.Fatalf("getinto: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("getinto = %q, want %q", got, "hello")
+	}
+	if &got[:cap(got)][0] != origPtr {
+		t.Fatal("GetInto allocated a new buffer despite sufficient capacity in dst")
+	}
+}
+
+func TestGetIntoGrowsBuffer(t *testing.T) {
+	s := openTestStore(t, punchdb.DefaultOptions())
+	ctx := context.Background()
+
+	val := bytes.Repeat([]byte("x"), 256)
+	if err := s.Set(ctx, []byte("k"), val); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	dst := make([]byte, 0, 4) // deliberately too small
+	got, err := s.GetInto(ctx, []byte("k"), dst)
+	if err != nil {
+		t.Fatalf("getinto: %v", err)
+	}
+	if !bytes.Equal(got, val) {
+		t.Fatal("getinto with grown buffer returned wrong value")
+	}
+}
+
+func TestGetIntoNotFound(t *testing.T) {
+	s := openTestStore(t, punchdb.DefaultOptions())
+	_, err := s.GetInto(context.Background(), []byte("missing"), nil)
+	if !errors.Is(err, punchdb.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestDelete(t *testing.T) {
 	s := openTestStore(t, punchdb.DefaultOptions())
 	ctx := context.Background()
@@ -225,6 +323,35 @@ func TestScanStopIteration(t *testing.T) {
 	}
 }
 
+func TestScanRespectsContextCancellation(t *testing.T) {
+	s := openTestStore(t, punchdb.DefaultOptions())
+	ctx := context.Background()
+
+	for i := 0; i < 1000; i++ {
+		key := []byte(fmt.Sprintf("k%04d", i))
+		if err := s.Set(ctx, key, []byte("v")); err != nil {
+			t.Fatalf("set: %v", err)
+		}
+	}
+
+	cancelCtx, cancel := context.WithCancel(ctx)
+	cancel() // canceled before the scan even starts
+
+	visited := 0
+	err := s.Scan(cancelCtx, []byte("k"), []byte("k\xff"), func(key, value []byte) error {
+		visited++
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	// The check runs every 256 keys, so cancellation must be observed within
+	// the first batch rather than after walking all 1000 keys.
+	if visited > 256 {
+		t.Fatalf("scan visited %d keys after cancellation, want <= 256", visited)
+	}
+}
+
 // TestPrefixScan verifies prefix matching AND tenant/type isolation, which is
 // the foundation of the multi-tenant key layout ({tenant}:d:{type}:{id}).
 func TestPrefixScan(t *testing.T) {
@@ -260,6 +387,58 @@ func TestPrefixScan(t *testing.T) {
 // -----------------------------------------------------------------------------
 // Lifecycle
 // -----------------------------------------------------------------------------
+
+func TestOpenCustomWALDir(t *testing.T) {
+	dataDir := t.TempDir()
+	walDir := filepath.Join(t.TempDir(), "custom-wal")
+
+	opts := punchdb.DefaultOptions()
+	opts.WALDir = walDir
+
+	s, err := Open(dataDir, opts)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	entries, err := os.ReadDir(walDir)
+	if err != nil {
+		t.Fatalf("read custom wal dir: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("custom WAL dir is empty; opts.WALDir may not have been honored")
+	}
+
+	// The default {path}/wal must NOT also have been created.
+	if _, err := os.Stat(filepath.Join(dataDir, "wal")); !os.IsNotExist(err) {
+		t.Fatalf("default wal dir should not exist when WALDir is set, stat err = %v", err)
+	}
+}
+
+func TestOpenReadOnlyDoesNotCreateDefaultWALDir(t *testing.T) {
+	// Build a normal store, checkpoint it, then reopen the checkpoint
+	// read-only and confirm no {path}/wal directory gets created for it.
+	s := openTestStore(t, punchdb.DefaultOptions())
+	ctx := context.Background()
+	if err := s.Set(ctx, []byte("k"), []byte("v")); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	cpDir := filepath.Join(t.TempDir(), "checkpoint")
+	if err := s.Checkpoint(cpDir); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+
+	restored, err := Open(cpDir, punchdb.Options{ReadOnly: true})
+	if err != nil {
+		t.Fatalf("open checkpoint read-only: %v", err)
+	}
+	defer restored.Close()
+
+	if _, err := os.Stat(filepath.Join(cpDir, "wal")); !os.IsNotExist(err) {
+		t.Fatalf("expected no default wal dir for a read-only store, stat err = %v", err)
+	}
+}
 
 func TestCloseIdempotent(t *testing.T) {
 	s, err := Open(t.TempDir(), punchdb.DefaultOptions())

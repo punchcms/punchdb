@@ -33,6 +33,18 @@ type Store interface {
 	// The returned slice is a safe copy the caller may retain indefinitely.
 	Get(ctx context.Context, key []byte) ([]byte, error)
 
+	// GetInto reads a key into the caller-supplied buffer, reusing dst's
+	// underlying array when its capacity is sufficient (dst may be nil or
+	// empty). It returns ErrNotFound when the key is absent. Prefer this over
+	// Get when the caller manages its own buffer pool and wants to avoid
+	// Get's one allocation per call.
+	GetInto(ctx context.Context, key, dst []byte) ([]byte, error)
+
+	// Exists reports whether a key is present, without paying for the value
+	// copy that Get performs. Use this for existence-only checks (e.g. slug
+	// collision checks) where the value itself is not needed.
+	Exists(ctx context.Context, key []byte) (bool, error)
+
 	// Set writes a key-value pair using NoSync (WAL provides durability).
 	Set(ctx context.Context, key, value []byte) error
 

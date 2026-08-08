@@ -21,6 +21,8 @@ report allocations via `-benchmem`.
 |------------------------|---------|------|-----------|
 | `Set`                  | 600.1   | 5    | **0**     |
 | `Get`                  | 223.5   | 128  | 1         |
+| `Exists`               | *TBD*   | *TBD*| *TBD*     |
+| `GetIntoReused`        | *TBD*   | *TBD*| *TBD*     |
 | `Delete`               | 586.1   | 4    | **0**     |
 | `BatchCommit` (100 ops)| 24623   | 4626 | 300       |
 | `PrefixScan` (10 keys) | 1007    | 24   | 2         |
@@ -40,8 +42,21 @@ durability without an `fsync` per operation.
 `Get` shows exactly **1 alloc/op (128 B)** — this is the **safe copy** of the
 value. Pebble returns a slice bound to an internal closer; copying it before
 closing guarantees the caller can retain the bytes safely. This allocation is
-deliberate and documented. A zero-copy variant (`GetInto(dst []byte)`) could be
-added later for callers who manage their own buffers.
+deliberate and documented. ### Exists and GetInto (added, numbers pending)
+
+`Exists` inspects Pebble's returned value and closes it immediately without
+copying — expected to land close to `Get`'s ns/op minus the copy, at
+**0 allocs/op**, matching `Set`/`Delete`.
+
+`GetInto` reuses the caller's buffer when its capacity is sufficient, so a
+warmed-up buffer (`BenchmarkGetIntoReused`) is expected at **0 allocs/op**
+once the buffer has grown to fit the value once. The *TBD* rows above need a
+real run — this environment has no Go toolchain or network access to fetch
+the Pebble module, so run it locally and fill these in:
+
+```bash
+go test ./pebble -bench='Exists|GetInto' -benchmem -run=^$
+```
 
 ### Batch commit
 
