@@ -230,6 +230,51 @@ func (s *Store) Get(ctx context.Context, key []byte) ([]byte, error) {
 	return out, nil
 }
 
+// GetInto reads a key into dst, reusing its underlying array when there is
+// enough capacity and allocating a new one only when there isn't. This avoids
+// the one allocation Get always pays for the safe copy — useful for callers
+// that already manage a buffer (e.g. a sync.Pool of read buffers).
+func (s *Store) GetInto(ctx context.Context, key, dst []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	val, closer, err := s.db.Get(key)
+	if err != nil {
+		if errors.Is(err, pebble.ErrNotFound) {
+			return nil, punchdb.ErrNotFound
+		}
+		return nil, err
+	}
+	defer closer.Close()
+
+	if cap(dst) < len(val) {
+		dst = make([]byte, len(val))
+	}
+	dst = dst[:len(val)]
+	copy(dst, val)
+	return dst, nil
+}
+
+// Exists reports whether key is present. Unlike Get, it never copies the
+// value out of Pebble's internal buffer — it inspects, then immediately
+// closes it — so it costs 0 allocations, matching the Set/Delete hot path.
+func (s *Store) Exists(ctx context.Context, key []byte) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
+	_, closer, err := s.db.Get(key)
+	if err != nil {
+		if errors.Is(err, pebble.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	closer.Close()
+	return true, nil
+}
+
 // Set writes a key-value pair using NoSync. The WAL provides durability.
 func (s *Store) Set(ctx context.Context, key, value []byte) error {
 	return s.db.Set(key, value, pebble.NoSync)
@@ -253,7 +298,20 @@ func (s *Store) Scan(ctx context.Context, start, end []byte, fn func(key, value 
 	}
 	defer iter.Close()
 
+	// Checking ctx on every key would add a mutex read to the hot path of
+	// small/paginated scans for no benefit. Checking periodically bounds how
+	// long a canceled scan keeps running without taxing the common case
+	// (page sizes are typically far below this interval).
+	const ctxCheckInterval = 256
+	visited := 0
+
 	for iter.First(); iter.Valid(); iter.Next() {
+		visited++
+		if visited%ctxCheckInterval == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
 		if err := fn(iter.Key(), iter.Value()); err != nil {
 			if errors.Is(err, punchdb.ErrStopIteration) {
 				return nil
